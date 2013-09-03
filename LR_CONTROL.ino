@@ -1,3 +1,12 @@
+#include <avr/io.h>
+#include <avr/interrupt.h>
+
+// define macros used to increase code readability
+#define SET(x,y) (x |= (1 << y))
+#define CLR(x,y) (x &= (~(1 << y)))
+#define CHK(x,y) (x & (1 << y))
+#define TOG(x,y) (x ^= (1 << y))
+
 // Input pins that monitor control box, three binary digits
 #define CONTROL_A0 4
 #define CONTROL_A1 5
@@ -5,8 +14,10 @@
 
 // Output pins that drive winch motor controller
 #define WINCH_AHI 7
-#define WINCH_BHI 8
-#define WINCH_PWM 9
+#define WINCH_BHI 0            // PORTB bit 0
+#define WINCH_PWM 3            // Timer2 - OC2B
+
+#define FWD_TROLLEY_PWM 11     // Timer2 - OC2A
 
 #define MC_DISABLE A3
 
@@ -22,18 +33,17 @@
 #define FAULT_A2 A7
 
 /* Motor current boundries 
-   992 = 3.3V
-   341 = 1.1V
+   997 ~= 3.3V
 */
-#define POS_OVERCURRENT 992
-#define NEG_OVERCURRENT 341 
+#define OVERCURRENT 997
 
+// 10 msec debounce time
 #define DEBOUNCE_TIME 10
 
 // PWM values
 #define ZERO_PWR 0
 #define HALF_PWR 25
-#define FULL_PWR 225
+#define FULL_PWR 255
 
 // State flags, all initially false
 volatile boolean fault = LOW;
@@ -45,10 +55,9 @@ volatile long last_time = 0;
 
 volatile int winch_current = 0;
 
-void timer1_init()
+static inline void timer_init()
 {
   cli();                   // global interrupt disable
-
   // setup the 16-bit timer 1 
   // TCCR1A - Timer1 / Counter Control Register A
   TCCR1A = 0;              // Set register to 0
@@ -61,15 +70,30 @@ void timer1_init()
   // Set CS10 bit for no prescaler
   TCCR1B |= (1 << CS10);
   // enable timer1 compare interrupt
-  TIMSK1 |= (1 << OCIE1A);          
-
+  TIMSK1 |= (1 << OCIE1A);      
+  // setup the 8-bit timer 2 
+  // TCCR2A - Timer1 / Counter Control Register A
+  TCCR2A = 0;              // Set register to 0
+  // TCCR2B - Timer1 / Counter Control Register B
+  TCCR2B = 0;              // Set register to 0
+  TCNT2 = 0;               // Initialize counter value to 0
+  // set non-inverting mode for A and B outputs
+  TCCR2A |= (1 << COM2A1) | (1 << COM2B1);
+  // set fast PWM mode
+  TCCR2A |= (1 << WGM21) | (1 << WGM20);
+  // set prescaler to 8 and starts PWM (1MHz)
+  TCCR2B |= (1 << CS21); 
+  // set compare match registers for zero duty cycle
+  OCR2A = ZERO_PWR;
+  OCR2B = ZERO_PWR;
+  
   sei();                     // global interrupt enable
   return; 
 }
-void adc_init()
+static inline void adc_init()
 {
   ADCSRA = 0;
-  ADCSRA |= ((1 << ADPS2)|(1 << ADPS0));//|(1 << ADPS0));                   // 8MHZ/2 = 4MHz the ADC reference clk
+  ADCSRA |= ((1 << ADPS2)|(1 << ADPS0));    // 8MHZ/2 = 4MHz the ADC reference clk
   ADMUX |= (1 << REFS0);                    // Voltage reference from Avcc 3.3V
   ADCSRA |= (1 << ADEN);                    // Turn on ADC
   ADCSRA |= (1 << ADSC);                    // Perform initial converesion
@@ -79,10 +103,6 @@ void setup()
 { 
   // Setup serial output for debugging
   Serial.begin(9600);
-  // Setup ADC for current sensor sampling
-  adc_init();
-  // Setup Timer1 for 0.1ms sample rate
-  timer1_init();
   
   // Control box input, active low
   pinMode(CONTROL_A0, INPUT);
@@ -99,8 +119,10 @@ void setup()
   
   // Outputs to winch motor control
   pinMode(WINCH_AHI, OUTPUT);
-  pinMode(WINCH_BHI, OUTPUT);  
+  pinMode(8, OUTPUT);  // WINCH_BHI
   pinMode(WINCH_PWM, OUTPUT);
+  
+  pinMode(FWD_TROLLEY_PWM, OUTPUT);
   
   pinMode(MC_DISABLE, OUTPUT);
   
@@ -108,6 +130,11 @@ void setup()
   pinMode(FAULT_A0, OUTPUT);
   pinMode(FAULT_A1, OUTPUT);
   pinMode(FAULT_A2, OUTPUT);
+  
+    // Setup ADC for current sensor sampling
+  adc_init();
+  // Setup Timer for 0.1ms sample rate and Timer2 for PWM
+  timer_init();
 } 
 
 void read_input() 
@@ -136,37 +163,59 @@ void process_input()
  if( !fault) {
    switch ( current_input) {
      case B01100000:    // Winch up at full speed
-       analogWrite(WINCH_PWM, FULL_PWR);
-       digitalWrite(WINCH_AHI, HIGH);    
-//       Serial.println("WINCH UP");
+       SET( TCCR2A, COM2B1);
+//       TCCR2A |= (1 << COM2B1);
+       OCR2B = FULL_PWR;
+       SET( PORTD, WINCH_AHI);
+//       PORTD |= _BV(WINCH_AHI);
        break;
          
      case B01010000:    // Winch up at half speed
-       analogWrite(WINCH_PWM, HALF_PWR);
-       digitalWrite(WINCH_AHI, HIGH);
-//       Serial.println("WINCH UP SLOW");
+       SET( TCCR2A, COM2B1);
+//       TCCR2A |= (1 << COM2B1);
+       OCR2B = HALF_PWR;
+       SET( PORTD, WINCH_AHI);
+//       PORTD |= _BV(WINCH_AHI);
        break; 
         
      case B01000000:    // Winch down at full speed
-       analogWrite(WINCH_PWM, FULL_PWR);
-       digitalWrite(WINCH_BHI, HIGH);
-//       Serial.println("WINCH DOWN");
+       SET( TCCR2A, COM2B1);
+//       TCCR2A |= (1 << COM2B1);
+       OCR2B = FULL_PWR;
+       SET( PORTB, WINCH_BHI);
+//       PORTB |= _BV(0);
        break;
         
      case B00110000:    // Winch down at half speed
-       analogWrite(WINCH_PWM, HALF_PWR);
-       digitalWrite(WINCH_BHI, HIGH);
-//       Serial.println("WINCH DOWN SLOW");
+       SET( TCCR2A, COM2B1);
+//       TCCR2A |= (1 << COM2B1);
+       OCR2B = HALF_PWR;
+       SET( PORTB, WINCH_BHI);
+//       PORTB |= _BV(0);
        break;
           
      default:          // Winch disabled
-       analogWrite(WINCH_PWM, ZERO_PWR);
-       digitalWrite(WINCH_AHI, LOW);
-       digitalWrite(WINCH_BHI, LOW);
-//       Serial.println("SYSTEM IDLE");
+       CLR( TCCR2A, COM2B1);
+       CLR( PORTD, WINCH_PWM);
+       CLR( PORTD, WINCH_AHI);
+       CLR( PORTB, WINCH_BHI);
+//       TCCR2A &= ~(1 << COM2B1);
+//       PORTD &= ~_BV(WINCH_PWM);
+//       PORTD &= ~_BV(WINCH_AHI);
+//       PORTB &= ~_BV(WINCH_BHI);
        break;
     }
   }
+  else {            // Winch disabled
+    CLR( TCCR2A, COM2B1);
+    CLR( PORTD, WINCH_PWM);
+    CLR( PORTD, WINCH_AHI);
+    CLR( PORTB, WINCH_BHI);
+//    TCCR2A &= ~(1 << COM2B1);
+//    PORTD &= ~_BV(WINCH_PWM);
+//    PORTD &= ~_BV(WINCH_AHI);
+//    PORTB &= ~_BV(WINCH_BHI);     
+    }
   return;
 }
 
@@ -176,10 +225,13 @@ void loop() {
   // process control input
   process_input();
  
-  Serial.println(winch_current);
+//  Serial.println(winch_current);
   if( winch_current > OVERCURRENT && !fault) {
     // diable timer1 compare interrupt
     TIMSK1 &= ~(1 << OCIE1A);
+    // disable motor controllers 
+    digitalWrite(MC_DISABLE, HIGH);
+    // set fault bit
     digitalWrite(FAULT_A0, HIGH);
     fault = HIGH;
   } 
@@ -188,7 +240,6 @@ void loop() {
 // Timer1 interrupt service routine
 ISR(TIMER1_COMPA_vect) 
 {
-  winch_current = analogRead(WINCH_CURRENT);            // read state of winch current
+  winch_current = analogRead(WINCH_CURRENT);          // read state of winch current
   digitalWrite( FAULT_A0, !digitalRead(FAULT_A0));    // used for debugging
 }
-
