@@ -13,6 +13,8 @@
 #define TROLLEY_FORE_PWM 10
 #define TROLLEY_AFT_PWM 11
 
+#define WINCH_CURRENT A0
+
 // define PWM values
 #define zero_pwr 0
 #define half_pwr 25
@@ -20,6 +22,15 @@
 
 volatile int control_input = 0;
 volatile int prev_control_input = 0;
+
+volatile int winch_current = 0;
+volatile int prev_winch_current = 0;
+
+volatile int trolley_fore_current = 0;
+volatile int prev_trolley_fore_current = 0;
+volatile int trolley_aft_current = 0;
+volatile int prev_trolley_aft_current = 0;
+
 
 void setup()  { 
   // Setup serial output to port (debugging)
@@ -33,6 +44,8 @@ void setup()  {
   digitalWrite(CONTROL_A0, HIGH);
   digitalWrite(CONTROL_A1, HIGH);
   digitalWrite(CONTROL_A2, HIGH);
+ 
+  pinMode(WINCH_CURRENT, INPUT);
   
   // Setup outputs to winch motor control
   pinMode(WINCH_AHI, OUTPUT);
@@ -87,5 +100,11 @@ void loop()  {
     // move current to previous before next loop
     prev_control_input = control_input;
     }
+    winch_current = analogRead(WINCH_CURRENT);
+    if( winch_current != prev_winch_current) {
+      Serial.print(winch_current);
+      Serial.print("\n");
+    }
+    prev_winch_current = winch_current;
 }
 
