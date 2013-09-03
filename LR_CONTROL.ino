@@ -8,40 +8,44 @@
 #define TOG(x,y) (x ^= (1 << y))
 
 // Input pins that monitor control box, three binary digits
-#define CONTROL_A0 4
-#define CONTROL_A1 5
-#define CONTROL_A2 6
+#define CONTROL_A0 PORTD4           // PORTD bit 4, IDE pin 4, pin 6
+#define CONTROL_A1 PORTD5           // PORTD bit 5, IDE pin 5, pin 11
+#define CONTROL_A2 PORTD6           // PORTD bit 6, IDE pin 6, pin 9
 
 // Output pins that drive winch motor controller
-#define WINCH_AHI 7            // PORTD bit 7
-#define WINCH_BHI 0            // PORTB bit 0
-#define WINCH_PWM 3            // PORTD bit 3 / Timer2 - OC2B
+#define WINCH_AHI PORTD7            // PORTD bit 7, IDE pin 7, pin 13
+#define WINCH_BHI PORTB0            // PORTB bit 0, IDE pin 8, pin 14
+#define WINCH_PWM PORTD3            // PORTD bit 3, IDE pin 3, pin 5 / Timer2 - OC2B
 
-#define FWD_TROLLEY_PWM 11     // Timer2 - OC2A
+#define FWD_TROLLEY_PWM PORTB3      // PORTB bit 3, IDE pin 11, pin 17 / Timer2 - OC2A
 
-#define MC_DISABLE A3
+#define MC_DISABLE PORTC3           // PORTC bit 3, IDE pin A3, pin 26
 
 // ADC input pins that monitor motor current / enclosure temperature
-#define WINCH_CURRENT A0
-#define FWD_TROLLEY_CURRENT A1
-#define AFT_TROLLEY_CURRENT A2
-#define ENC_TEMP A4
+#define WINCH_CURRENT PORTC0        // PORTC bit 0, IDE pin A0, pin 23
+#define FWD_TROLLEY_CURRENT PORTC1  // PORTC bit 1, IDE pin A1, pin 24
+#define AFT_TROLLEY_CURRENT PORTC2  // PORTC bit 2, IDE pin A2, pin 25
+#define ENC_TEMP PORTC4             // PORTC bit 4, IDE pin A4, pin 27
 
 /* Output pins that send fault code to interface 
    000 = NO FAULT
    001 = WINCH OVERCURRENT
+   010 = FWD TROLLEY OVERCURRENT
+   011 = AFT TROLLEY OVERCURRENT
+   100 = ENCLOSURE OVERTEMP
+   101 = CONTROLLER FAILURE
 */
 #define FAULT_A0 A5
 #define FAULT_A1 A6
 #define FAULT_A2 A7
 
 /* Motor current boundries 
-   997 ~= 3.3V
+   997 ~= 3.15V
 */
 #define OVERCURRENT 997
 
-// 10 msec debounce time
-#define DEBOUNCE_TIME 10
+// 50 msec debounce time
+#define DEBOUNCE_TIME 50
 
 // PWM values
 #define ZERO_PWR 0
@@ -49,17 +53,18 @@
 #define FULL_PWR 255
 
 // State flags, all initially false
-volatile boolean fault = LOW;
-volatile boolean winch_active = LOW;
-volatile boolean fwd_trolley_active = LOW;
-volatile boolean aft_trolley_active = LOW;
+boolean fault = LOW;
+boolean winch_active = LOW;
+boolean fwd_trolley_active = LOW;
+boolean aft_trolley_active = LOW;
 
 // input variable used for debouncing and control box input
 volatile int current_input = 0;
 volatile int prev_input = 0;
 volatile long last_time = 0;
 
-volatile int winch_current = 0;
+volatile uint16_t winch_current = 0;
+
 
 // function used to initialize Timer0 and Timer2
 static inline void timer_init()
@@ -100,11 +105,22 @@ static inline void timer_init()
 // function used to initialize ADC
 static inline void adc_init()
 {
-  ADCSRA = 0;
-  ADCSRA |= ((1 << ADPS2)|(1 << ADPS0));    // 8MHZ/2 = 4MHz the ADC reference clk
+  ADCSRA = 0;                               // Set register to 0 
+  ADCSRA |= (1 << ADPS2) | (1 << ADPS0);    // 8MHZ/2 = 4MHz the ADC reference clk
   ADMUX |= (1 << REFS0);                    // Voltage reference from Avcc 3.3V
   ADCSRA |= (1 << ADEN);                    // Turn on ADC
   ADCSRA |= (1 << ADSC);                    // Perform initial converesion
+}
+
+// function used to read ADC
+uint16_t read_adc( uint8_t channel)
+{
+  channel &= 0B00000111;                    // AND with 7
+  ADMUX &= 0x0F8;                           // Clear old channel that was read
+  ADMUX |= channel;                         // Defines new channel to read 
+  ADCSRA |= (1 << ADSC);                    // Start new conversion
+  while( ADCSRA & (1 << ADSC));             // Wait until conversion is complete 
+  return ADC;  
 }
 
 void setup()  
@@ -113,9 +129,9 @@ void setup()
   Serial.begin(9600);
   
   // Control box input, active low
-  pinMode(CONTROL_A0, INPUT);
-  pinMode(CONTROL_A1, INPUT);
-  pinMode(CONTROL_A2, INPUT);
+  SET(DDRD, CONTROL_A0);
+  SET(DDRD, CONTROL_A1);
+  SET(DDRD, CONTROL_A2);
   
   // Turn on pullup resistors for control box input
   digitalWrite(CONTROL_A0, HIGH);
@@ -123,16 +139,16 @@ void setup()
   digitalWrite(CONTROL_A2, HIGH);
   
   // Winch current monitor 
-  pinMode(WINCH_CURRENT, INPUT);
-  
+  SET(DDRC, WINCH_CURRENT);
+    
   // Outputs to winch motor control
   SET(DDRD, WINCH_AHI);
   SET(DDRB, WINCH_BHI);
   SET(DDRD, WINCH_PWM);
   
-  pinMode(FWD_TROLLEY_PWM, OUTPUT);
-  
-  pinMode(MC_DISABLE, OUTPUT);
+  SET(DDRB, FWD_TROLLEY_PWM);
+ 
+  SET(DDRC, MC_DISABLE);
   
   // Outputs for fault information, to interface
   pinMode(FAULT_A0, OUTPUT);
@@ -237,11 +253,12 @@ void loop() {
     digitalWrite(FAULT_A0, HIGH);
     fault = HIGH;
   } 
+//  digitalWrite( 13, !digitalRead(13));              // used for debugging  
 }
 
 // Timer1 interrupt service routine
 ISR(TIMER1_COMPA_vect) 
 {
-  winch_current = analogRead(WINCH_CURRENT);          // read state of winch current
-//  digitalWrite( FAULT_A0, !digitalRead(FAULT_A0));    // used for debugging
+  winch_current = read_adc(PORTC0);                 // read state of winch current
+//  digitalWrite( 13, !digitalRead(13));              // used for debugging
 }
