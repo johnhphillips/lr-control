@@ -13,9 +13,9 @@
 #define CONTROL_A2 6
 
 // Output pins that drive winch motor controller
-#define WINCH_AHI 7
+#define WINCH_AHI 7            // PORTD bit 7
 #define WINCH_BHI 0            // PORTB bit 0
-#define WINCH_PWM 3            // Timer2 - OC2B
+#define WINCH_PWM 3            // PORTD bit 3 / Timer2 - OC2B
 
 #define FWD_TROLLEY_PWM 11     // Timer2 - OC2A
 
@@ -23,6 +23,9 @@
 
 // ADC input pins that monitor motor current / enclosure temperature
 #define WINCH_CURRENT A0
+#define FWD_TROLLEY_CURRENT A1
+#define AFT_TROLLEY_CURRENT A2
+#define ENC_TEMP A4
 
 /* Output pins that send fault code to interface 
    000 = NO FAULT
@@ -48,13 +51,17 @@
 // State flags, all initially false
 volatile boolean fault = LOW;
 volatile boolean winch_active = LOW;
+volatile boolean fwd_trolley_active = LOW;
+volatile boolean aft_trolley_active = LOW;
 
+// input variable used for debouncing and control box input
 volatile int current_input = 0;
 volatile int prev_input = 0;
 volatile long last_time = 0;
 
 volatile int winch_current = 0;
 
+// function used to initialize Timer0 and Timer2
 static inline void timer_init()
 {
   cli();                   // global interrupt disable
@@ -65,7 +72,7 @@ static inline void timer_init()
   TCCR1B = 0;              // Set register to 0
   TCNT1 = 0;               // Initialize counter value to 0
   // set compare match register for 10000Hz increments (0.1 msec)
-  OCR1A = 800 - 1;           
+  OCR1A = 800 - 1;      
   TCCR1B |= (1 << WGM12);  // Turn on CTC mode
   // Set CS10 bit for no prescaler
   TCCR1B |= (1 << CS10);
@@ -90,6 +97,7 @@ static inline void timer_init()
   sei();                     // global interrupt enable
   return; 
 }
+// function used to initialize ADC
 static inline void adc_init()
 {
   ADCSRA = 0;
@@ -118,9 +126,9 @@ void setup()
   pinMode(WINCH_CURRENT, INPUT);
   
   // Outputs to winch motor control
-  pinMode(WINCH_AHI, OUTPUT);
-  pinMode(8, OUTPUT);  // WINCH_BHI
-  pinMode(WINCH_PWM, OUTPUT);
+  SET(DDRD, WINCH_AHI);
+  SET(DDRB, WINCH_BHI);
+  SET(DDRD, WINCH_PWM);
   
   pinMode(FWD_TROLLEY_PWM, OUTPUT);
   
@@ -137,6 +145,7 @@ void setup()
   timer_init();
 } 
 
+// function used to read input from control box via priority encoder
 void read_input() 
 {
   // Read the state of the control inputs into a local variable:
@@ -157,64 +166,57 @@ void read_input()
   return;
 }
 
+// function used to process input from control box
 void process_input()
 {
   // check that not faulted, then process input 
  if( !fault) {
    switch ( current_input) {
      case B01100000:    // Winch up at full speed
+       winch_active = HIGH;
        SET( TCCR2A, COM2B1);
-//       TCCR2A |= (1 << COM2B1);
        OCR2B = FULL_PWR;
        SET( PORTD, WINCH_AHI);
-//       PORTD |= _BV(WINCH_AHI);
        break;
          
      case B01010000:    // Winch up at half speed
+       winch_active = HIGH;
        SET( TCCR2A, COM2B1);
-//       TCCR2A |= (1 << COM2B1);
        OCR2B = HALF_PWR;
        SET( PORTD, WINCH_AHI);
-//       PORTD |= _BV(WINCH_AHI);
        break; 
         
      case B01000000:    // Winch down at full speed
+       winch_active = HIGH;
        SET( TCCR2A, COM2B1);
-//       TCCR2A |= (1 << COM2B1);
        OCR2B = FULL_PWR;
        SET( PORTB, WINCH_BHI);
-//       PORTB |= _BV(0);
        break;
         
      case B00110000:    // Winch down at half speed
+       winch_active = HIGH;
        SET( TCCR2A, COM2B1);
-//       TCCR2A |= (1 << COM2B1);
        OCR2B = HALF_PWR;
        SET( PORTB, WINCH_BHI);
-//       PORTB |= _BV(0);
        break;
           
-     default:          // Winch disabled
+     default:          // Winch & trolleys disabled
+       winch_active = LOW;
        CLR( TCCR2A, COM2B1);
        CLR( PORTD, WINCH_PWM);
        CLR( PORTD, WINCH_AHI);
        CLR( PORTB, WINCH_BHI);
-//       TCCR2A &= ~(1 << COM2B1);
-//       PORTD &= ~_BV(WINCH_PWM);
-//       PORTD &= ~_BV(WINCH_AHI);
-//       PORTB &= ~_BV(WINCH_BHI);
        break;
     }
   }
-  else {            // Winch disabled
+  else {              // Winch & trolleys disabled
+    winch_active = LOW;
+    fwd_trolley_active = LOW;
+    aft_trolley_active = LOW;
     CLR( TCCR2A, COM2B1);
     CLR( PORTD, WINCH_PWM);
     CLR( PORTD, WINCH_AHI);
     CLR( PORTB, WINCH_BHI);
-//    TCCR2A &= ~(1 << COM2B1);
-//    PORTD &= ~_BV(WINCH_PWM);
-//    PORTD &= ~_BV(WINCH_AHI);
-//    PORTB &= ~_BV(WINCH_BHI);     
     }
   return;
 }
@@ -225,10 +227,10 @@ void loop() {
   // process control input
   process_input();
  
-//  Serial.println(winch_current);
+  // check status of winch current
   if( winch_current > OVERCURRENT && !fault) {
     // diable timer1 compare interrupt
-    TIMSK1 &= ~(1 << OCIE1A);
+    CLR( TIMSK1, OCIE1A);
     // disable motor controllers 
     digitalWrite(MC_DISABLE, HIGH);
     // set fault bit
@@ -241,5 +243,5 @@ void loop() {
 ISR(TIMER1_COMPA_vect) 
 {
   winch_current = analogRead(WINCH_CURRENT);          // read state of winch current
-  digitalWrite( FAULT_A0, !digitalRead(FAULT_A0));    // used for debugging
+//  digitalWrite( FAULT_A0, !digitalRead(FAULT_A0));    // used for debugging
 }
