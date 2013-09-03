@@ -39,6 +39,8 @@
 #define POS_OVERCURRENT 992
 #define NEG_OVERCURRENT 341 
 
+#define DEBOUNCE_TIME 10
+
 // PWM values
 #define ZERO_PWR 0
 #define HALF_PWR 25
@@ -54,6 +56,9 @@ volatile int prev_control_input = 0;
 
 volatile int winch_current = 0;
 volatile int prev_winch_current = 0;
+
+volatile int fault_code = B000;
+volatile int prev_fault_code = B000;
 
 void setup()  { 
   // Setup serial output for debugging
@@ -85,52 +90,68 @@ void setup()  {
   pinMode(FAULT_A2, OUTPUT);
 } 
 
+
+
 void loop()  { 
-  // read control input 
+  // read control input, pins 4, 5, 6
   control_input = PIND & B01110000;
-  
-  if( control_input != prev_control_input) {
+  // check that input has changed, ADD DEBOUNCE, and that not faulted
+  if( control_input != prev_control_input && fault != 1) {
     Serial.print(control_input, BIN);
     Serial.print("\n");
     switch ( control_input){
       case B01100000:    // Winch up at full speed
         winch_active = 1;
-        analogWrite(WINCH_PWM, full_pwr);
+        analogWrite(WINCH_PWM, FULL_PWR);
         digitalWrite(WINCH_AHI, HIGH);    
-        Serial.print("WINCH UP\n");
+        Serial.println("WINCH UP");
         break;
        
       case B01010000:    // Winch up at half speed
         winch_active = 1;
-        analogWrite(WINCH_PWM, half_pwr);
+        analogWrite(WINCH_PWM, HALF_PWR);
         digitalWrite(WINCH_AHI, HIGH);
-        Serial.print("WINCH UP SLOW\n");
+        Serial.println("WINCH UP SLOW");
         break; 
       
       case B01000000:    // Winch down at full speed
         winch_active = 1;
-        analogWrite(WINCH_PWM, full_pwr);
+        analogWrite(WINCH_PWM, FULL_PWR);
         digitalWrite(WINCH_BHI, HIGH);
-        Serial.print("WINCH DOWN\n");
+        Serial.println("WINCH DOWN");
         break;
       
       case B00110000:    // Winch down at half speed
         winch_active = 1;
-        analogWrite(WINCH_PWM, half_pwr);
+        analogWrite(WINCH_PWM, HALF_PWR);
         digitalWrite(WINCH_BHI, HIGH);
-        Serial.print("WINCH DOWN SLOW\n");
+        Serial.println("WINCH DOWN SLOW");
         break;
         
       default:          // Winch disabled
         winch_active = 0;
-        analogWrite(WINCH_PWM, zero_pwr);
+        analogWrite(WINCH_PWM, ZERO_PWR);
         digitalWrite(WINCH_AHI, LOW);
         digitalWrite(WINCH_BHI, LOW);
-        Serial.print("SYSTEM IDLE\n");
+        Serial.println("SYSTEM IDLE");
         break;
     }
     // move current to previous before next loop
     prev_control_input = control_input;
+    }
+        // in fault state
+    else if( fault == 1 && fault_code != prev_fault_code) {
+      // disable all motor controller outputs
+      winch_active = 0;
+      analogWrite(WINCH_PWM, ZERO_PWR);
+      digitalWrite(WINCH_AHI, LOW);
+      digitalWrite(WINCH_BHI, LOW);
+      Serial.println("SYSTEM FAULT");
+      // send fault code to output
+      digitalWrite(FAULT_A0, fault_code);
+      Serial.print("FAULT CODE = ");
+      Serial.println(fault_code, BIN);
+      prev_fault_code = fault_code;
     }
     // read in analog voltage that represents winch current, 
     // only when winch is active
@@ -149,8 +170,11 @@ void loop()  {
       // check that winch current is in an overcurrent state
       if( winch_current <= NEG_OVERCURRENT || winch_current >= POS_OVERCURRENT) {
         digitalWrite(MC_DISABLE, HIGH);
+        fault = 1;
+        fault_code = B001;
       }
       prev_winch_current = winch_current;
     }
+    
 }
 
